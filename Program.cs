@@ -24,19 +24,29 @@ namespace RelativizeIncludes
                     var examplePath = @"C:\Source\Project";
                     return new List<Example>()
                     {
-                        new Example($"Read and modify all source files from {examplePath} to use relative #include paths", new Options() {RootDirectoryPath = examplePath})
+                        new Example(
+                            $"Read and modify all source files from {examplePath} to use relative #include paths",
+                            new Options() {RootDirectoryPath = examplePath})
                     };
                 }
             }
 
-            [Option('p', "path", Required = false, Default = null, HelpText = "The root path of the directory containing all source files to process. If no path is specified, the current directory is used.")]
+            [Option('p', "path", Required = false, Default = null,
+                HelpText =
+                    "The root path of the directory containing all source files to process. If no path is specified, the current directory is used.")]
             public string RootDirectoryPath { get; set; }
 
-            [Option('d', "dry-run", Required = false, HelpText = "Perform a dry run and print out potential replacements.")]
+            [Option('d', "dry-run", Required = false,
+                HelpText = "Perform a dry run and print out potential replacements.")]
             public bool DryRun { get; set; }
 
-            [Option('s', "staging", Required = false, Default = null, HelpText = "Copy modified source files to the specified path. This should be an empty directory.")]
+            [Option('s', "staging", Required = false, Default = null,
+                HelpText = "Copy modified source files to the specified path. This should be an empty directory.")]
             public string StagingDirectoryPath { get; set; }
+
+            [Option('i', "ignore-case", Required = false, Default = false,
+                HelpText = "Ignore case when searching for matching header files by name.")]
+            public bool IgnoreCase { get; set; }
         }
 
         static void Main(string[] args)
@@ -110,18 +120,17 @@ namespace RelativizeIncludes
                     fileText = reader.ReadToEnd();
                 }
 
-                var replacedText = rgx.Replace(fileText, m => EvaluateMatch(m, file, sourceFiles));
+                var replacedText = rgx.Replace(fileText, m => EvaluateMatch(m, file, sourceFiles, options.IgnoreCase));
 
                 if (!options.DryRun && !ReferenceEquals(replacedText, fileText))
                 {
-                    var destinationPath = Path.Combine(destinationDirectoryPath, GetRelativePath(rootDirectoryPath, file.FullName));
-                    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath));
-                    File.WriteAllText(destinationPath, replacedText);
+                    File.WriteAllText(file.FullName, replacedText);
                 }
             }
         }
 
-        private static string EvaluateMatch(Match match, FileInfo includingFile, IEnumerable<FileInfo> sourceFiles)
+        private static string EvaluateMatch(Match match, FileInfo includingFile, IEnumerable<FileInfo> sourceFiles,
+            bool ignoreCase)
         {
             Console.Write('\t');
             Console.ForegroundColor = ConsoleColor.Cyan;
@@ -143,7 +152,8 @@ namespace RelativizeIncludes
             var headerPath = match.Groups[1].Value;
             var headerFileName = Path.GetFileName(headerPath);
 
-            var matchingHeaderFiles = sourceFiles.Where(f => f.Name == headerFileName).ToList();
+            var matchingHeaderFiles = sourceFiles.Where(f => String.Equals(f.Name, headerFileName,
+                ignoreCase ? StringComparison.CurrentCultureIgnoreCase : StringComparison.CurrentCulture)).ToList();
             if (matchingHeaderFiles.Count == 0)
             {
                 Console.WriteLine("\t\tNo matching headers found...");
@@ -217,7 +227,9 @@ namespace RelativizeIncludes
         }
 
         [DllImport("shlwapi.dll", CharSet = CharSet.Auto)]
-        private static extern bool PathRelativePathTo([Out] StringBuilder pszPath, [In] string pszFrom, [In] FileAttributes dwAttrFrom, [In] string pszTo, [In] FileAttributes dwAttrTo);
+        private static extern bool PathRelativePathTo([Out] StringBuilder pszPath, [In] string pszFrom,
+            [In] FileAttributes dwAttrFrom, [In] string pszTo, [In] FileAttributes dwAttrTo);
+
         private static string GetRelativePath(string fromPath, string toPath)
         {
             var sb = new StringBuilder(MaxPathLength);
