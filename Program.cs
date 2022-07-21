@@ -216,7 +216,6 @@ namespace RelativizeIncludes
             return replacement;
         }
 
-
         [DllImport("shlwapi.dll", CharSet = CharSet.Auto)]
         private static extern bool PathRelativePathTo([Out] StringBuilder pszPath, [In] string pszFrom, [In] FileAttributes dwAttrFrom, [In] string pszTo, [In] FileAttributes dwAttrTo);
         private static string GetRelativePath(string fromPath, string toPath)
