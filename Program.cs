@@ -36,7 +36,7 @@ namespace RelativizeIncludes
                     "The root path of the directory containing all source files to process. If no path is specified, the current directory is used.")]
             public string RootDirectoryPath { get; set; }
 
-            [Option('d', "dry-run", Required = false,
+            [Option('d', "dry-run", Required = false, Default = false,
                 HelpText = "Perform a dry run and print out potential replacements.")]
             public bool DryRun { get; set; }
 
@@ -106,7 +106,8 @@ namespace RelativizeIncludes
 
             var pattern = @"#include\s+""(.*)""";
             var rgx = new Regex(pattern);
-
+            var replacementCount = 0;
+            var replacementFileCount = 0;
             foreach (var file in sourceFiles)
             {
                 Console.ForegroundColor = ConsoleColor.Cyan;
@@ -120,17 +121,26 @@ namespace RelativizeIncludes
                     fileText = reader.ReadToEnd();
                 }
 
-                var replacedText = rgx.Replace(fileText, m => EvaluateMatch(m, file, sourceFiles, options.IgnoreCase));
+                var replacedText = rgx.Replace(fileText,
+                    m => EvaluateMatch(m, file, sourceFiles, options.IgnoreCase, ref replacementCount));
 
-                if (!options.DryRun && !ReferenceEquals(replacedText, fileText))
+                if (!ReferenceEquals(replacedText, fileText))
                 {
-                    File.WriteAllText(file.FullName, replacedText);
+                    if (!options.DryRun)
+                    {
+                        File.WriteAllText(file.FullName, replacedText);
+                    }
+
+                    replacementFileCount++;
                 }
             }
+
+            Console.WriteLine();
+            Console.WriteLine($"Replaced {replacementCount} include directives in {replacementFileCount} files.");
         }
 
         private static string EvaluateMatch(Match match, FileInfo includingFile, IEnumerable<FileInfo> sourceFiles,
-            bool ignoreCase)
+            bool ignoreCase, ref int replacementCount)
         {
             Console.Write('\t');
             Console.ForegroundColor = ConsoleColor.Cyan;
@@ -222,6 +232,8 @@ namespace RelativizeIncludes
             Console.Write(replacement);
             Console.ResetColor();
             Console.WriteLine();
+
+            replacementCount++;
 
             return replacement;
         }
