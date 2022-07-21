@@ -1,56 +1,108 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using CommandLine;
+using CommandLine.Text;
 
 namespace RelativizeIncludes
 {
-    internal partial class Program
+    internal class Program
     {
-        private static readonly string[] SourceExtensions = { ".h", ".hpp", ".cpp" };
-        private const bool UseTestDirectory = true;
+        private static readonly string[] SourceExtensions = {".h", ".hpp", ".cpp", ".c++", ".c"};
+        private const int MaxPathLength = 260;
 
-        static void Main(string[] args)
+        class Options
         {
-            ParseAndRun(args);
-            //TestRelativePaths();
-        }
-
-        private static void ParseAndRun(string[] args)
-        {
-            string rootDirectoryPath = Directory.GetCurrentDirectory();
-            if (args.Length > 0)
+            public static IEnumerable<Example> Examples
             {
-                rootDirectoryPath = args[0];
-            }
-            Console.WriteLine($"Root directory: {rootDirectoryPath}");
-
-            // Optionally write the output to a test path
-            string testDirectoryPath = rootDirectoryPath;
-            if (UseTestDirectory)
-            {
-                testDirectoryPath = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "Test");
-                Directory.CreateDirectory(testDirectoryPath);
-                foreach (var testFilePath in Directory.GetFiles(testDirectoryPath, "*.*", SearchOption.AllDirectories))
+                get
                 {
-                    File.Delete(testFilePath);
+                    var examplePath = @"C:\Source\Project";
+                    return new List<Example>()
+                    {
+                        new Example($"Read and modify all source files from {examplePath} to use relative #include paths", new Options() {RootDirectoryPath = examplePath})
+                    };
                 }
             }
 
+            [Option('p', "path", Required = false, Default = null, HelpText = "The root path of the directory containing all source files to process. If no path is specified, the current directory is used.")]
+            public string RootDirectoryPath { get; set; }
+
+            [Option('d', "dry-run", Required = false, HelpText = "Perform a dry run and print out potential replacements.")]
+            public bool DryRun { get; set; }
+
+            [Option('s', "staging", Required = false, Default = null, HelpText = "Copy modified source files to the specified path. This should be an empty directory.")]
+            public string StagingDirectoryPath { get; set; }
+        }
+
+        static void Main(string[] args)
+        {
+            // TODO: Validate args
+            try
+            {
+                var parseResult = Parser.Default.ParseArguments<Options>(args);
+
+                if (parseResult.Errors.Any())
+                {
+                    return;
+                }
+
+                Run(parseResult.Value);
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine("ERROR:");
+                Console.Error.WriteLine(e.ToString());
+                throw;
+            }
+        }
+
+        private static void Run(Options options)
+        {
+            string rootDirectoryPath = options.RootDirectoryPath;
+            if (string.IsNullOrWhiteSpace(rootDirectoryPath))
+            {
+                rootDirectoryPath = Directory.GetCurrentDirectory();
+            }
+
+            Console.WriteLine($"Root directory: {rootDirectoryPath}");
+
+            string destinationDirectoryPath = rootDirectoryPath;
+            if (!string.IsNullOrEmpty(options.StagingDirectoryPath))
+            {
+                if (Directory.EnumerateFileSystemEntries(options.StagingDirectoryPath).Any())
+                {
+                    Console.Error.WriteLine("ERROR: Staging directory is not empty.");
+                    return;
+                }
+
+                destinationDirectoryPath = options.StagingDirectoryPath;
+            }
+
             var rootDirInfo = new DirectoryInfo(rootDirectoryPath);
-            var sourceFiles = rootDirInfo.GetFiles("*.*", SearchOption.AllDirectories).Where(f => SourceExtensions.Contains(f.Extension)).ToList();
+            var sourceFiles = rootDirInfo.GetFiles("*.*", SearchOption.AllDirectories)
+                .Where(f => SourceExtensions.Contains(f.Extension)).ToList();
 
             Console.WriteLine($"{sourceFiles.Count} source files found...");
+
+            if (options.DryRun)
+            {
+                Console.WriteLine("Performing dry run...");
+            }
 
             var pattern = @"#include\s+""(.*)""";
             var rgx = new Regex(pattern);
 
-            var evaluator = new IncludeMatchEvaluator(sourceFiles);
-
             foreach (var file in sourceFiles)
             {
-                Console.WriteLine($"File: {file}");
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.Write("Including file");
+                Console.ResetColor();
+                Console.WriteLine($": {file.FullName}");
 
                 var fileText = string.Empty;
                 using (var reader = new StreamReader(file.OpenRead()))
@@ -58,32 +110,125 @@ namespace RelativizeIncludes
                     fileText = reader.ReadToEnd();
                 }
 
-                evaluator.CurrentFilePath = file.FullName;
-                var replacedText = rgx.Replace(fileText, evaluator.Evaluate);
+                var replacedText = rgx.Replace(fileText, m => EvaluateMatch(m, file, sourceFiles));
 
-                var destinationPath = Path.Combine(testDirectoryPath, PathHelper.GetRelativePath(rootDirectoryPath, file.FullName));
-                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath));
-                File.WriteAllText(destinationPath, replacedText);
+                if (!options.DryRun && !ReferenceEquals(replacedText, fileText))
+                {
+                    var destinationPath = Path.Combine(destinationDirectoryPath, GetRelativePath(rootDirectoryPath, file.FullName));
+                    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath));
+                    File.WriteAllText(destinationPath, replacedText);
+                }
             }
         }
 
-        private static void TestRelativePaths()
+        private static string EvaluateMatch(Match match, FileInfo includingFile, IEnumerable<FileInfo> sourceFiles)
         {
-            var from = @"C:\Folder1\Folder2\Test.txt";
-            var to = @"C:\Folder1\Test2.txt";
-            Console.WriteLine($"\"{from}\" -> \"{to}\": {PathHelper.GetRelativePath(from, to)}");
+            Console.Write('\t');
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.Write("Match");
+            Console.ResetColor();
+            Console.WriteLine($": {match.Value}");
 
-            from = @"C:\Folder1\Test2.txt";
-            to = @"C:\Folder1\Folder2\Test.txt";
-            Console.WriteLine($"\"{from}\" -> \"{to}\": {PathHelper.GetRelativePath(from, to)}");
+            if (match.Groups.Count <= 1)
+            {
+                return match.Value;
+            }
 
-            from = @"C:\Folder1\Folder2\";
-            to = @"C:\FolderA\FolderB\";
-            Console.WriteLine($"\"{from}\" -> \"{to}\": {PathHelper.GetRelativePath(from, to)}");
+            if (includingFile == null)
+            {
+                Console.WriteLine($"\t\tCurrent file is not set. Skipping...");
+                return match.Value;
+            }
 
-            from = @"C:\FolderC\FolderD\Test1.txt";
-            to = @"C:\Folder1\";
-            Console.WriteLine($"\"{from}\" -> \"{to}\": {PathHelper.GetRelativePath(from, to)}");
+            var headerPath = match.Groups[1].Value;
+            var headerFileName = Path.GetFileName(headerPath);
+
+            var matchingHeaderFiles = sourceFiles.Where(f => f.Name == headerFileName).ToList();
+            if (matchingHeaderFiles.Count == 0)
+            {
+                Console.WriteLine("\t\tNo matching headers found...");
+                return match.Value;
+            }
+
+            var replacementHeaderFile = matchingHeaderFiles.First();
+            if (matchingHeaderFiles.Count > 1)
+            {
+                Console.WriteLine("\ttFound multiple matching headers:");
+                var headerCount = 1;
+                foreach (var header in matchingHeaderFiles)
+                {
+                    Console.WriteLine($"\t\t\t[{headerCount++}]: {header.FullName}");
+                }
+
+                Console.WriteLine("\t\tChoose header (enter number 1 or greater):");
+                var response = Console.ReadLine();
+
+                if (int.TryParse(response, out var headerNumber) &&
+                    headerNumber > 0 &&
+                    headerNumber <= matchingHeaderFiles.Count)
+                {
+                    replacementHeaderFile = matchingHeaderFiles[headerNumber - 1];
+                }
+                else
+                {
+                    Console.WriteLine("\t\tChoosing the first result...");
+                }
+            }
+
+            string replacement;
+            if (replacementHeaderFile.DirectoryName == includingFile.DirectoryName)
+            {
+                // If the replacement header is in the same directory, we don't
+                // need to find the relative path
+                replacement = $"#include \"{replacementHeaderFile.Name}\"";
+            }
+            else
+            {
+                var relPath = GetRelativePath(includingFile.FullName, replacementHeaderFile.FullName);
+
+                // Remove any leading ".\" if the replacement header shares a path with the including file.     
+                if (relPath.StartsWith($".{Path.DirectorySeparatorChar}"))
+                {
+                    relPath = relPath.Substring(2);
+                }
+
+                replacement = $"#include \"{relPath.Replace(Path.DirectorySeparatorChar, '/')}\"";
+            }
+
+            if (replacement == match.Value)
+            {
+                Console.WriteLine("\t\tNo replacement required.");
+
+                // Return the same reference since no replacement is needed
+                return match.Value;
+            }
+
+            Console.Write($"\t\t");
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Write(match.Value);
+            Console.ResetColor();
+            Console.Write(" -> ");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.Write(replacement);
+            Console.ResetColor();
+            Console.WriteLine();
+
+            return replacement;
+        }
+
+
+        [DllImport("shlwapi.dll", CharSet = CharSet.Auto)]
+        private static extern bool PathRelativePathTo([Out] StringBuilder pszPath, [In] string pszFrom, [In] FileAttributes dwAttrFrom, [In] string pszTo, [In] FileAttributes dwAttrTo);
+        private static string GetRelativePath(string fromPath, string toPath)
+        {
+            var sb = new StringBuilder(MaxPathLength);
+
+            if (PathRelativePathTo(sb, fromPath, FileAttributes.Normal, toPath, FileAttributes.Normal))
+            {
+                return sb.ToString();
+            }
+
+            throw new InvalidOperationException($"Unable to get relative path from \"{fromPath}\" to \"{toPath}\"))");
         }
     }
 }
