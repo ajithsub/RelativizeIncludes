@@ -173,26 +173,23 @@ namespace RelativizeIncludes
             var replacementHeaderFile = matchingHeaderFiles.First();
             if (matchingHeaderFiles.Count > 1)
             {
-                Console.WriteLine("\ttFound multiple matching headers:");
+                Console.WriteLine("\t\tFound multiple matching headers:");
                 var headerCount = 1;
                 foreach (var header in matchingHeaderFiles)
                 {
                     Console.WriteLine($"\t\t\t[{headerCount++}]: {header.FullName}");
                 }
 
-                Console.WriteLine("\t\tChoose header (enter number 1 or greater):");
-                var response = Console.ReadLine();
+                string response = null;
+                int headerNumber;
+                while (!int.TryParse(response, out headerNumber) || headerNumber <= 0 ||
+                       headerNumber > matchingHeaderFiles.Count)
+                {
+                    Console.Write("\t\tChoose header (enter number 1 or greater): ");
+                    response = Console.ReadLine();
+                }
 
-                if (int.TryParse(response, out var headerNumber) &&
-                    headerNumber > 0 &&
-                    headerNumber <= matchingHeaderFiles.Count)
-                {
-                    replacementHeaderFile = matchingHeaderFiles[headerNumber - 1];
-                }
-                else
-                {
-                    Console.WriteLine("\t\tChoosing the first result...");
-                }
+                replacementHeaderFile = matchingHeaderFiles[headerNumber - 1];
             }
 
             string replacement;
