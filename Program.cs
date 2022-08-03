@@ -162,7 +162,7 @@ namespace RelativizeIncludes
             var headerPath = match.Groups[1].Value;
             var headerFileName = Path.GetFileName(headerPath);
 
-            var matchingHeaderFiles = sourceFiles.Where(f => String.Equals(f.Name, headerFileName,
+            var matchingHeaderFiles = sourceFiles.Where(f => string.Equals(f.Name, headerFileName,
                 ignoreCase ? StringComparison.CurrentCultureIgnoreCase : StringComparison.CurrentCulture)).ToList();
             if (matchingHeaderFiles.Count == 0)
             {
@@ -182,11 +182,19 @@ namespace RelativizeIncludes
 
                 string response = null;
                 int headerNumber;
-                while (!int.TryParse(response, out headerNumber) || headerNumber <= 0 ||
+                while (!int.TryParse(response, out headerNumber) || headerNumber < 0 ||
                        headerNumber > matchingHeaderFiles.Count)
                 {
-                    Console.Write("\t\tChoose header (enter number 1 or greater): ");
+                    Console.Write("\t\tChoose header (enter number 1 or greater, 0 to skip): ");
                     response = Console.ReadLine();
+                }
+
+                if (headerNumber == 0)
+                {
+                    Console.WriteLine("\t\tSkipping...");
+
+                    // Return the same reference since no replacement is needed
+                    return match.Value;
                 }
 
                 replacementHeaderFile = matchingHeaderFiles[headerNumber - 1];
