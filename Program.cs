@@ -12,7 +12,7 @@ namespace RelativizeIncludes
 {
     internal class Program
     {
-        private static readonly string[] SourceExtensions = { ".h", ".hpp", ".cpp", ".c++", ".c" };
+        private static readonly string[] SourceExtensions = {".h", ".hpp", ".cpp", ".c++", ".c"};
         private const int MaxPathLength = 260;
 
         class Options
@@ -36,7 +36,8 @@ namespace RelativizeIncludes
                     "The root path of the directory containing all source files to process. If no path is specified, the current directory is used.")]
             public string RootDirectoryPath { get; set; }
 
-            [Option('a', "additional-include-dir-file", Required = false, Default = null, HelpText = "Path to a text file containing additional include directory paths")]
+            [Option('a', "additional-include-dir-file", Required = false, Default = null,
+                HelpText = "Path to a text file containing additional include directory paths")]
             public string AdditionalIncludeDirectoriesFilePath { get; set; }
 
             [Option('d', "dry-run", Required = false, Default = false,
@@ -50,6 +51,10 @@ namespace RelativizeIncludes
             [Option('i', "ignore-case", Required = false, Default = false,
                 HelpText = "Ignore case when searching for matching header files by name.")]
             public bool IgnoreCase { get; set; }
+
+            [Option('b', "use-brackets", Required = false, Default = false,
+                HelpText = "Use angle brackets (<>) in addition to apostrophes for matching include directives.")]
+            public bool UseBrackets { get; set; }
         }
 
         static void Main(string[] args)
@@ -84,8 +89,8 @@ namespace RelativizeIncludes
 
             Console.WriteLine($"Root directory: {rootDirectoryPath}");
 
-            var additionalIncludeDirectoryPaths = Enumerable.Empty<string>();
-            var additionalIncludeFiles = Enumerable.Empty<FileInfo>();
+            var additionalIncludeDirectoryPaths = new List<string>();
+            var additionalIncludeFiles = new List<FileInfo>();
             if (!string.IsNullOrWhiteSpace(options.AdditionalIncludeDirectoriesFilePath))
             {
                 if (!File.Exists(options.AdditionalIncludeDirectoriesFilePath) ||
@@ -95,31 +100,40 @@ namespace RelativizeIncludes
                     return;
                 }
 
-                var includePaths = new List<string>();
                 using (var reader = new StreamReader(options.AdditionalIncludeDirectoriesFilePath))
                 {
                     string fileLine;
                     while ((fileLine = reader.ReadLine()) != null)
                     {
-                        includePaths.Add(fileLine);
+                        if (string.IsNullOrWhiteSpace(fileLine) || fileLine.Trim().StartsWith("#"))
+                        {
+                            continue;
+                        }
+
+                        additionalIncludeDirectoryPaths.Add(Path.GetFullPath(fileLine) + Path.DirectorySeparatorChar);
                     }
                 }
 
-                additionalIncludeDirectoryPaths = includePaths;
-
-                // TODO: Validate additional include paths to make sure they
-                // exist
-                var includeFiles = new List<FileInfo>();
                 foreach (var path in additionalIncludeDirectoryPaths)
                 {
-                    var includeDirInfo = new DirectoryInfo(rootDirectoryPath);
-                    includeFiles.AddRange(includeDirInfo.GetFiles("*.*", SearchOption.AllDirectories));
-                }
+                    if (!Directory.Exists(path) || path.Any(c => Path.GetInvalidPathChars().Contains(c)))
+                    {
+                        continue;
+                    }
 
-                additionalIncludeFiles = includeFiles;
+                    var includeDirInfo = new DirectoryInfo(path);
+                    additionalIncludeFiles.AddRange(includeDirInfo.GetFiles("*.*", SearchOption.AllDirectories));
+                }
             }
 
-            string destinationDirectoryPath = rootDirectoryPath;
+            Console.WriteLine("Include paths:");
+            foreach (var path in additionalIncludeDirectoryPaths)
+            {
+                Console.WriteLine($"\t{path}");
+            }
+
+            Console.WriteLine($"Total include files: {additionalIncludeFiles.Count}");
+
             if (!string.IsNullOrEmpty(options.StagingDirectoryPath))
             {
                 if (Directory.EnumerateFileSystemEntries(options.StagingDirectoryPath).Any())
@@ -127,8 +141,6 @@ namespace RelativizeIncludes
                     Console.Error.WriteLine("ERROR: Staging directory is not empty.");
                     return;
                 }
-
-                destinationDirectoryPath = options.StagingDirectoryPath;
             }
 
             var rootDirInfo = new DirectoryInfo(rootDirectoryPath);
@@ -142,8 +154,12 @@ namespace RelativizeIncludes
                 Console.WriteLine("Performing dry run...");
             }
 
-            var pattern = @"#include\s+""(.*)""";
-            var rgx = new Regex(pattern);
+            // NOTE: Bracket support will match things like "#include <string>",
+            // so make sure that the include paths (using the -a flag) contain
+            // the C++ standard library. Otherwise, there is a risk of the
+            // header resolving incorrectly (e.g. "SomeLib/string.h" vs C++ STL
+            // <string>)
+            var rgx = new Regex(options.UseBrackets ? @"#\s*include\s*([""<])(.*)([>""])" : @"#\s*include\s*("")(.*)("")");
             var replacementCount = 0;
             var replacementFileCount = 0;
             foreach (var file in sourceFiles)
@@ -153,7 +169,7 @@ namespace RelativizeIncludes
                 Console.ResetColor();
                 Console.WriteLine($": {file.FullName}");
 
-                var fileText = string.Empty;
+                string fileText;
                 using (var reader = new StreamReader(file.OpenRead()))
                 {
                     fileText = reader.ReadToEnd();
@@ -161,17 +177,34 @@ namespace RelativizeIncludes
 
                 var replacedText = rgx.Replace(fileText,
                     m => EvaluateMatch(m, file, sourceFiles, additionalIncludeFiles,
-                    additionalIncludeDirectoryPaths, options.IgnoreCase, ref replacementCount));
+                        additionalIncludeDirectoryPaths, options.IgnoreCase, ref replacementCount));
 
-                if (!ReferenceEquals(replacedText, fileText))
+                if (ReferenceEquals(replacedText, fileText))
                 {
-                    if (!options.DryRun)
+                    // No replacements have been made if there is reference
+                    // equality between the replaced and original strings.
+
+                    continue;
+                }
+
+                if (!options.DryRun)
+                {
+                    string destinationFilePath;
+                    if (!string.IsNullOrEmpty(options.StagingDirectoryPath))
                     {
-                        File.WriteAllText(file.FullName, replacedText);
+                        destinationFilePath = Path.Combine(options.StagingDirectoryPath,
+                            GetRelativePath(rootDirectoryPath, file.FullName));
+                    }
+                    else
+                    {
+                        destinationFilePath = file.FullName;
                     }
 
-                    replacementFileCount++;
+                    Directory.CreateDirectory(Path.GetDirectoryName(destinationFilePath));
+                    File.WriteAllText(destinationFilePath, replacedText);
                 }
+
+                replacementFileCount++;
             }
 
             Console.WriteLine();
@@ -199,11 +232,18 @@ namespace RelativizeIncludes
                 return match.Value;
             }
 
-            var headerPath = match.Groups[1].Value;
+            var includeTokenLeft = match.Groups[1].Value;
+            var headerPath = match.Groups[2].Value;
+            var includeTokenRight = match.Groups[3].Value;
+
             var headerFileName = Path.GetFileName(headerPath);
 
-            var matchingHeaderFiles = sourceFiles.Concat(includeFiles).Where(f => string.Equals(f.Name, headerFileName,
-                ignoreCase ? StringComparison.CurrentCultureIgnoreCase : StringComparison.CurrentCulture)).ToList();
+            bool Selector(FileInfo f) => string.Equals(f.Name, headerFileName,
+                ignoreCase ? StringComparison.CurrentCultureIgnoreCase : StringComparison.CurrentCulture);
+
+            var matchingHeaderFiles = sourceFiles.Where(Selector).ToList();
+            matchingHeaderFiles.AddRange(includeFiles.Where(Selector));
+
             if (matchingHeaderFiles.Count == 0)
             {
                 Console.WriteLine("\t\tNo matching headers found...");
@@ -234,6 +274,7 @@ namespace RelativizeIncludes
                     Console.WriteLine("\t\tSkipping...");
 
                     // Return the same reference since no replacement is needed
+
                     return match.Value;
                 }
 
@@ -245,32 +286,31 @@ namespace RelativizeIncludes
             {
                 // If the replacement header is in the same directory, we don't
                 // need to find the relative path
+
                 replacement = $"#include \"{replacementHeaderFile.Name}\"";
             }
             else
             {
-                var relPath = string.Empty;
-                foreach (var includePath in includePaths)
-                {
-                    var path = GetRelativePath(includePath, replacementHeaderFile.FullName);
-                    if (path.StartsWith($".{Path.DirectorySeparatorChar}"))
-                    {
-                        // The replacement header is part of one of the include directories.
-                        relPath = path.Substring(2);
-                    }
-                }
+                // Find the relative path to the replacement header from all
+                // include directories first. If multiple include paths match,
+                // pick the more specific one. If an include path is not found,
+                // find the relative path from the including file.
+                var relPath = includePaths.Where(p => replacementHeaderFile.FullName.StartsWith(p)).Max();
 
                 if (string.IsNullOrEmpty(relPath))
                 {
                     relPath = GetRelativePath(includingFile.FullName, replacementHeaderFile.FullName);
-                    // Remove any leading ".\" if the replacement header shares a path with the including file.
-                    if (relPath.StartsWith($".{Path.DirectorySeparatorChar}"))
-                    {
-                        relPath = relPath.Substring(2);
-                    }
                 }
 
-                replacement = $"#include \"{relPath.Replace(Path.DirectorySeparatorChar, '/')}\"";
+                // Remove any leading ".\" if the replacement header shares a
+                // path with the including file.
+                if (relPath.StartsWith($".{Path.DirectorySeparatorChar}"))
+                {
+                    relPath = relPath.Substring(2);
+                }
+
+                replacement =
+                    $"#include {includeTokenLeft}{relPath.Replace(Path.DirectorySeparatorChar, '/')}{includeTokenRight}";
             }
 
             if (replacement == match.Value)
