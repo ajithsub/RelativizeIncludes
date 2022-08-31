@@ -12,7 +12,7 @@ namespace RelativizeIncludes
 {
     internal class Program
     {
-        private static readonly string[] SourceExtensions = {".h", ".hpp", ".cpp", ".c++", ".c"};
+        private static readonly string[] SourceExtensions = {".h", ".hpp", ".cpp", ".c++", ".c", ".inl"};
         private const int MaxPathLength = 260;
         private const string IncludePathCwdSubst = "$(cwd)";
 
@@ -56,6 +56,11 @@ namespace RelativizeIncludes
             [Option('b', "use-brackets", Required = false, Default = false,
                 HelpText = "Use angle brackets (<>) in addition to apostrophes for matching include directives.")]
             public bool UseBrackets { get; set; }
+
+            [Option("encoding",
+                HelpText =
+                    "Specifies encoding to use (e.g. \"utf-8\") for output files. By default, the detected encoding of the file is used for the output file.")]
+            public string Encoding { get; set; }
         }
 
         static void Main(string[] args)
@@ -74,8 +79,45 @@ namespace RelativizeIncludes
             }
             catch (Exception e)
             {
-                PrintError("Exception:", ex:e);
+                PrintError("Exception:", ex: e);
                 throw;
+            }
+        }
+
+        private static Encoding GetFileEncoding(FileInfo file)
+        {
+            var ude = new Ude.CharsetDetector();
+            using (var stream = file.OpenRead())
+            {
+                ude.Feed(stream);
+                ude.DataEnd();
+
+                if (!string.IsNullOrEmpty(ude.Charset))
+                {
+                    try
+                    {
+                        return Encoding.GetEncoding(ude.Charset);
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"Invalid encoding detected ({ude.Charset}):");
+                        Console.WriteLine(ex);
+                        Console.WriteLine("Using UTF-8 as fallback encoding...");
+                        Console.ResetColor();
+
+                        return Encoding.UTF8;
+                    }
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine(
+                        $"Unable to detect encoding for file {file.FullName}. Using UTF-8 as fallback encoding...");
+                    Console.ResetColor();
+
+                    return Encoding.UTF8;
+                }
             }
         }
 
@@ -165,6 +207,12 @@ namespace RelativizeIncludes
                 Console.WriteLine("Performing dry run...");
             }
 
+            var outputEncoding = string.IsNullOrEmpty(options.Encoding) ? null : Encoding.GetEncoding(options.Encoding);
+            Console.Write("Output file encoding: ");
+            Console.WriteLine(outputEncoding != null
+                ? $"{outputEncoding.EncodingName} ({outputEncoding.WebName})"
+                : $"Detected from source");
+
             // NOTE: Bracket support will match things like "#include <string>",
             // so make sure that the include paths (using the -a flag) contain
             // the C++ standard library. Otherwise, there is a risk of the
@@ -175,18 +223,29 @@ namespace RelativizeIncludes
                 : @"#\s*include\s*("")(.*)("")");
             var replacementCount = 0;
             var replacementFileCount = 0;
+            var invalidPathChars = Path.GetInvalidPathChars();
+            var invalidFileNameChars = Path.GetInvalidFileNameChars();
             foreach (var file in sourceFiles)
             {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.Write("Including file");
-                Console.ResetColor();
-                Console.WriteLine($": {file.FullName}");
+                if (file.DirectoryName?.Any(c => invalidPathChars.Contains(c)) == true ||
+                    file.Name.Any(c => invalidFileNameChars.Contains(c)))
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Invalid characters: {file.FullName}");
+                }
+
+                var encoding = GetFileEncoding(file);
 
                 string fileText;
-                using (var reader = new StreamReader(file.OpenRead()))
+                using (var reader = new StreamReader(file.OpenRead(), encoding))
                 {
                     fileText = reader.ReadToEnd();
                 }
+
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.Write("Including file");
+                Console.ResetColor();
+                Console.WriteLine($": {file.FullName} ({encoding.EncodingName})");
 
                 var replacedText = rgx.Replace(fileText,
                     m => EvaluateMatch(m, file, sourceFiles, additionalIncludeFiles,
@@ -214,7 +273,7 @@ namespace RelativizeIncludes
                     }
 
                     Directory.CreateDirectory(Path.GetDirectoryName(destinationFilePath));
-                    File.WriteAllText(destinationFilePath, replacedText);
+                    File.WriteAllText(destinationFilePath, replacedText, outputEncoding ?? encoding);
                 }
 
                 replacementFileCount++;
@@ -222,6 +281,14 @@ namespace RelativizeIncludes
 
             Console.WriteLine();
             Console.WriteLine($"Replaced {replacementCount} include directives in {replacementFileCount} files.");
+            Console.WriteLine();
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+        }
+
+        private static bool DoesPathHaveValidChars(string path)
+        {
+            return !path.Any(c => Path.GetInvalidPathChars().Contains(c));
         }
 
         private class FileInfoDistinctComparer : IEqualityComparer<FileInfo>
@@ -256,7 +323,7 @@ namespace RelativizeIncludes
             {
                 return match.Value;
             }
-
+            
             if (includingFile == null)
             {
                 Console.WriteLine($"\t\tCurrent file is not set. Skipping...");
@@ -275,7 +342,7 @@ namespace RelativizeIncludes
             var matchingHeaderFiles = sourceFiles.Where(Selector).ToList();
             matchingHeaderFiles.AddRange(includeFiles.Where(Selector));
             matchingHeaderFiles = matchingHeaderFiles.Distinct(new FileInfoDistinctComparer()).ToList();
-            
+
             if (matchingHeaderFiles.Count == 0)
             {
                 Console.WriteLine("\t\tNo matching headers found...");
@@ -325,12 +392,21 @@ namespace RelativizeIncludes
             {
                 // Find the relative path to the replacement header from all
                 // include directories first. If multiple include paths match,
-                // pick the more specific one. If an include path is not found,
-                // find the relative path from the including file.
+                // pick the more specific one using the largest path length. If
+                // an include path is not found, find the relative path from the
+                // including file.
 
-                string relPath = null; 
+                string relPath = null;
 
-                var matchingIncludePath = includePaths.Where(p => replacementHeaderFile.FullName.StartsWith(p)).Max();
+                var matchingIncludes = includePaths.Where(p => replacementHeaderFile.FullName.StartsWith(p)).ToList();
+
+                string matchingIncludePath = null;
+                if (matchingIncludes.Any())
+                {
+                    matchingIncludePath =
+                        matchingIncludes.Aggregate((max, curr) => max.Length > curr.Length ? max : curr);
+                }
+
                 if (!string.IsNullOrEmpty(matchingIncludePath))
                 {
                     relPath = GetRelativePath(matchingIncludePath, replacementHeaderFile.FullName);
@@ -375,6 +451,7 @@ namespace RelativizeIncludes
 
             return replacement;
         }
+
         private static void PrintError(string message, Exception ex = null)
         {
             Console.ForegroundColor = ConsoleColor.Red;
@@ -383,6 +460,7 @@ namespace RelativizeIncludes
             {
                 Console.Error.WriteLine(ex.ToString());
             }
+
             Console.ResetColor();
         }
 
